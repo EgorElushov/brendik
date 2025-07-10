@@ -2,10 +2,12 @@ import logging
 import json
 import os
 import random
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.filters import Command
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 API_TOKEN = "8138806291:AAE4PYZjKkBd4La8DSjfmqL8mg1JrnU1APM"  # Замените на свой токен от BotFather
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
+dp = Dispatcher(storage=storage)
 
 # Файл для хранения ключевых слов и ID администраторов
 KEYWORDS_FILE = "keywords.json"
@@ -29,16 +31,19 @@ default_data = {
 }
 
 # Путь к файлу с именами администраторов
-ADMINS_FILE = "admins.json"
+ADMINS_FILE = "admis.json"
 
 # Загрузка списка администраторов из файла
 def load_admins():
     if os.path.exists(ADMINS_FILE):
         with open(ADMINS_FILE, "r", encoding="utf-8") as file:
             try:
+                # Пробуем загрузить как JSON
                 return json.load(file)
             except json.JSONDecodeError:
-                return []
+                # Если не получилось, считаем, что это текстовый файл со списком имен
+                file.seek(0)  # Возвращаемся в начало файла
+                return [line.strip() for line in file if line.strip()]
     else:
         return []
 
@@ -100,7 +105,7 @@ def is_admin(message):
     return username in data["admins"]
 
 # Обработчик команды /start
-@dp.message_handler(commands=["start"])
+@dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я бот для отслеживания ключевых слов в чате.\n\n"
@@ -117,7 +122,7 @@ async def cmd_start(message: types.Message):
     )
 
 # Обработчик команды /help
-@dp.message_handler(commands=["help"])
+@dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
         "📚 Справка по командам:\n\n"
@@ -133,17 +138,17 @@ async def cmd_help(message: types.Message):
     )
 
 # Обработчик команды /add_keyword
-@dp.message_handler(commands=["add_keyword"])
-async def cmd_add_keyword(message: types.Message):
+@dp.message(Command("add_keyword"))
+async def cmd_add_keyword(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
-    await Form.add_keyword.set()
+    await state.set_state(Form.add_keyword)
     await message.answer("📝 Введите ключевое слово или фразу для добавления:")
 
 # Обработчик ввода нового ключевого слова
-@dp.message_handler(state=Form.add_keyword)
+@dp.message(Form.add_keyword)
 async def process_add_keyword(message: types.Message, state: FSMContext):
     keyword = message.text.lower().strip()
     
@@ -153,13 +158,13 @@ async def process_add_keyword(message: types.Message, state: FSMContext):
     data = load_data()
     if keyword in data["keywords"]:
         await message.answer(f"⚠️ Ключевое слово '{keyword}' уже существует.")
-        await state.finish()
+        await state.clear()
     else:
-        await Form.add_keyword_reaction.set()
+        await state.set_state(Form.add_keyword_reaction)
         await message.answer(f"📝 Введите реакцию для ключевого слова '{keyword}':")
 
 # Обработчик ввода реакции для нового ключевого слова
-@dp.message_handler(state=Form.add_keyword_reaction)
+@dp.message(Form.add_keyword_reaction)
 async def process_add_keyword_reaction(message: types.Message, state: FSMContext):
     reaction = message.text
     
@@ -170,13 +175,13 @@ async def process_add_keyword_reaction(message: types.Message, state: FSMContext
     # Сохраняем реакцию в состоянии для следующего шага
     await state.update_data(reaction=reaction)
     
-    await Form.add_keyword_probability.set()
+    await state.set_state(Form.add_keyword_probability)
     await message.answer(
         f"📊 Введите вероятность реакции для ключевого слова '{keyword}' (от 1 до 100 процентов):"
     )
 
 # Обработчик ввода вероятности для нового ключевого слова
-@dp.message_handler(state=Form.add_keyword_probability)
+@dp.message(Form.add_keyword_probability)
 async def process_add_keyword_probability(message: types.Message, state: FSMContext):
     try:
         probability = int(message.text.strip())
@@ -201,13 +206,13 @@ async def process_add_keyword_probability(message: types.Message, state: FSMCont
             f"• Реакция: {reaction}\n"
             f"• Вероятность: {probability}%"
         )
-        await state.finish()
+        await state.clear()
     except ValueError:
         await message.answer("⚠️ Ошибка: вероятность должна быть числом. Попробуйте снова:")
 
 # Обработчик команды /remove_keyword
-@dp.message_handler(commands=["remove_keyword"])
-async def cmd_remove_keyword(message: types.Message):
+@dp.message(Command("remove_keyword"))
+async def cmd_remove_keyword(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
@@ -217,21 +222,24 @@ async def cmd_remove_keyword(message: types.Message):
         await message.answer("⚠️ Список ключевых слов пуст.")
         return
     
-    await Form.remove_keyword.set()
+    await state.set_state(Form.remove_keyword)
     
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    # Создаем клавиатуру в новом формате
+    buttons = []
     for keyword in data["keywords"]:
-        keyboard.add(keyword)
-    keyboard.add("Отмена")
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
+    
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
     
     await message.answer("🗑️ Выберите ключевое слово для удаления:", reply_markup=keyboard)
 
 # Обработчик удаления ключевого слова
-@dp.message_handler(state=Form.remove_keyword)
+@dp.message(Form.remove_keyword)
 async def process_remove_keyword(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()
+        await state.clear()
         return
     
     keyword = message.text.lower().strip()
@@ -240,16 +248,16 @@ async def process_remove_keyword(message: types.Message, state: FSMContext):
     if keyword in data["keywords"]:
         del data["keywords"][keyword]
         save_data(data)
-        await message.answer(f"✅ Ключевое слово '{keyword}' успешно удалено.", 
+        await message.answer(f"✅ Ключевое слово '{keyword}' успешно удалено.",
                             reply_markup=types.ReplyKeyboardRemove())
     else:
-        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.", 
+        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
                             reply_markup=types.ReplyKeyboardRemove())
     
-    await state.finish()
+    await state.clear()
 
 # Обработчик команды /list_keywords
-@dp.message_handler(commands=["list_keywords"])
+@dp.message(Command("list_keywords"))
 async def cmd_list_keywords(message: types.Message):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
@@ -280,8 +288,8 @@ async def cmd_list_keywords(message: types.Message):
         )
 
 # Обработчик команды /set_reaction
-@dp.message_handler(commands=["set_reaction"])
-async def cmd_set_reaction(message: types.Message):
+@dp.message(Command("set_reaction"))
+async def cmd_set_reaction(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
@@ -291,22 +299,25 @@ async def cmd_set_reaction(message: types.Message):
         await message.answer("⚠️ Список ключевых слов пуст. Сначала добавьте ключевые слова.")
         return
     
-    await Form.select_keyword_for_reaction.set()
+    await state.set_state(Form.select_keyword_for_reaction)
     
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    # Создаем клавиатуру в новом формате
+    buttons = []
     for keyword in data["keywords"]:
-        keyboard.add(keyword)
-    keyboard.add("Отмена")
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
     
-    await message.answer("📝 Выберите ключевое слово, для которого нужно изменить реакцию:", 
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    
+    await message.answer("📝 Выберите ключевое слово, для которого нужно изменить реакцию:",
                         reply_markup=keyboard)
 
 # Обработчик выбора ключевого слова для изменения реакции
-@dp.message_handler(state=Form.select_keyword_for_reaction)
+@dp.message(Form.select_keyword_for_reaction)
 async def process_select_keyword(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()
+        await state.clear()
         return
     
     keyword = message.text.lower().strip()
@@ -320,16 +331,16 @@ async def process_select_keyword(message: types.Message, state: FSMContext):
             current_reaction = data["keywords"][keyword]
             
         await state.update_data(keyword=keyword)
-        await Form.set_reaction.set()
+        await state.set_state(Form.set_reaction)
         await message.answer(f"📝 Текущая реакция для '{keyword}': {current_reaction}\n\n"
                             f"Введите новую реакцию:", reply_markup=types.ReplyKeyboardRemove())
     else:
-        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.", 
+        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
                             reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()
+        await state.clear()
 
 # Обработчик установки новой реакции для ключевого слова
-@dp.message_handler(state=Form.set_reaction)
+@dp.message(Form.set_reaction)
 async def process_set_reaction(message: types.Message, state: FSMContext):
     new_reaction = message.text
     
@@ -353,11 +364,11 @@ async def process_set_reaction(message: types.Message, state: FSMContext):
     save_data(data)
     
     await message.answer(f"✅ Реакция для ключевого слова '{keyword}' успешно изменена на: {new_reaction}")
-    await state.finish()
+    await state.clear()
 
 # Обработчик команды /set_probability
-@dp.message_handler(commands=["set_probability"])
-async def cmd_set_probability(message: types.Message):
+@dp.message(Command("set_probability"))
+async def cmd_set_probability(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
@@ -367,22 +378,25 @@ async def cmd_set_probability(message: types.Message):
         await message.answer("⚠️ Список ключевых слов пуст. Сначала добавьте ключевые слова.")
         return
     
-    await Form.select_keyword_for_probability.set()
+    await state.set_state(Form.select_keyword_for_probability)
     
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    # Создаем клавиатуру в новом формате
+    buttons = []
     for keyword in data["keywords"]:
-        keyboard.add(keyword)
-    keyboard.add("Отмена")
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
+    
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
     
     await message.answer("📝 Выберите ключевое слово, для которого нужно изменить вероятность реакции:",
                         reply_markup=keyboard)
 
 # Обработчик выбора ключевого слова для изменения вероятности
-@dp.message_handler(state=Form.select_keyword_for_probability)
+@dp.message(Form.select_keyword_for_probability)
 async def process_select_keyword_for_probability(message: types.Message, state: FSMContext):
     if message.text == "Отмена":
         await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()
+        await state.clear()
         return
     
     keyword = message.text.lower().strip()
@@ -397,17 +411,17 @@ async def process_select_keyword_for_probability(message: types.Message, state: 
             current_probability = 100
             
         await state.update_data(keyword=keyword)
-        await Form.set_probability.set()
+        await state.set_state(Form.set_probability)
         await message.answer(f"📊 Текущая вероятность реакции для '{keyword}': {current_probability}%\n\n"
                             f"Введите новую вероятность (от 1 до 100):",
                             reply_markup=types.ReplyKeyboardRemove())
     else:
         await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
                             reply_markup=types.ReplyKeyboardRemove())
-        await state.finish()
+        await state.clear()
 
 # Обработчик установки новой вероятности для ключевого слова
-@dp.message_handler(state=Form.set_probability)
+@dp.message(Form.set_probability)
 async def process_set_probability(message: types.Message, state: FSMContext):
     try:
         new_probability = int(message.text.strip())
@@ -435,18 +449,18 @@ async def process_set_probability(message: types.Message, state: FSMContext):
         save_data(data)
         
         await message.answer(f"✅ Вероятность реакции для ключевого слова '{keyword}' успешно изменена на: {new_probability}%")
-        await state.finish()
+        await state.clear()
     except ValueError:
         await message.answer("⚠️ Ошибка: вероятность должна быть числом. Попробуйте снова:")
 
 # Обработчик команды /set_default
-@dp.message_handler(commands=["set_default"])
-async def cmd_set_default_reaction(message: types.Message):
+@dp.message(Command("set_default"))
+async def cmd_set_default_reaction(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
-    await Form.set_default_reaction.set()
+    await state.set_state(Form.set_default_reaction)
     
     data = load_data()
     current_default = data.get("default_reaction", DEFAULT_REACTION)
@@ -455,7 +469,7 @@ async def cmd_set_default_reaction(message: types.Message):
                         f"Введите новую реакцию по умолчанию:")
 
 # Обработчик установки новой реакции по умолчанию
-@dp.message_handler(state=Form.set_default_reaction)
+@dp.message(Form.set_default_reaction)
 async def process_set_default_reaction(message: types.Message, state: FSMContext):
     new_default = message.text
     
@@ -464,16 +478,16 @@ async def process_set_default_reaction(message: types.Message, state: FSMContext
     save_data(data)
     
     await message.answer(f"✅ Реакция по умолчанию успешно изменена на: {new_default}")
-    await state.finish()
+    await state.clear()
 
 # Обработчик команды /set_default_prob
-@dp.message_handler(commands=["set_default_prob"])
-async def cmd_set_default_probability(message: types.Message):
+@dp.message(Command("set_default_prob"))
+async def cmd_set_default_probability(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
-    await Form.set_default_probability.set()
+    await state.set_state(Form.set_default_probability)
     
     data = load_data()
     current_default_prob = data.get("default_probability", 100)
@@ -482,7 +496,7 @@ async def cmd_set_default_probability(message: types.Message):
                         f"Введите новую вероятность по умолчанию (от 1 до 100):")
 
 # Обработчик установки новой вероятности по умолчанию
-@dp.message_handler(state=Form.set_default_probability)
+@dp.message(Form.set_default_probability)
 async def process_set_default_probability(message: types.Message, state: FSMContext):
     try:
         new_default_prob = int(message.text.strip())
@@ -495,22 +509,22 @@ async def process_set_default_probability(message: types.Message, state: FSMCont
         save_data(data)
         
         await message.answer(f"✅ Вероятность реакции по умолчанию успешно изменена на: {new_default_prob}%")
-        await state.finish()
+        await state.clear()
     except ValueError:
         await message.answer("⚠️ Ошибка: вероятность должна быть числом. Попробуйте снова:")
 
 # Обработчик команды /add_admin
-@dp.message_handler(commands=["add_admin"])
-async def cmd_add_admin(message: types.Message):
+@dp.message(Command("add_admin"))
+async def cmd_add_admin(message: types.Message, state: FSMContext):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
         return
     
-    await Form.add_admin.set()
+    await state.set_state(Form.add_admin)
     await message.answer("📝 Введите имя пользователя (username) без символа @, которого нужно сделать администратором:")
 
 # Обработчик добавления нового администратора
-@dp.message_handler(state=Form.add_admin)
+@dp.message(Form.add_admin)
 async def process_add_admin(message: types.Message, state: FSMContext):
     admin_username = message.text.strip()
     
@@ -526,10 +540,10 @@ async def process_add_admin(message: types.Message, state: FSMContext):
         save_data(data)
         await message.answer(f"✅ Пользователь @{admin_username} успешно добавлен как администратор.")
     
-    await state.finish()
+    await state.clear()
 
 # Обработчик команды /reload_admins
-@dp.message_handler(commands=["reload_admins"])
+@dp.message(Command("reload_admins"))
 async def cmd_reload_admins(message: types.Message):
     if not is_admin(message):
         await message.answer("⛔ У вас нет прав администратора.")
@@ -546,8 +560,12 @@ async def cmd_reload_admins(message: types.Message):
         await message.answer(f"⚠️ Ошибка при загрузке администраторов: {str(e)}")
 
 # Обработчик всех текстовых сообщений
-@dp.message_handler(content_types=types.ContentType.TEXT)
+@dp.message()
 async def check_keywords(message: types.Message):
+    # Проверяем, что это текстовое сообщение
+    if not message.text:
+        return
+        
     data = load_data()
     message_text = message.text.lower()
     
@@ -573,5 +591,12 @@ async def check_keywords(message: types.Message):
     # можно убрать return и использовать список найденных слов
 
 # Запуск бота
+async def main():
+    # Регистрируем все обработчики
+    # (они уже зарегистрированы через декораторы)
+    
+    # Запускаем бота
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
