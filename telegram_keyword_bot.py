@@ -27,7 +27,8 @@ default_data = {
     "admins": [],  # Список имен пользователей-администраторов
     "keywords": {},  # Словарь ключевых слов, их реакций и вероятностей
     "default_reaction": DEFAULT_REACTION,  # Реакция по умолчанию для новых слов
-    "default_probability": 100  # Вероятность реакции по умолчанию (в процентах)
+    "default_probability": 100,  # Вероятность реакции по умолчанию (в процентах)
+    "voice_reactions": {}  # Словарь голосовых реакций (ключ: keyword, значение: file_id)
 }
 
 # Путь к файлу с именами администраторов
@@ -76,6 +77,8 @@ class Form(StatesGroup):
     set_default_reaction = State()  # Установка реакции по умолчанию
     set_default_probability = State()  # Установка вероятности по умолчанию
     add_admin = State()  # Состояние добавления администратора
+    waiting_for_voice = State()  # Ожидание голосового сообщения для реакции
+    select_keyword_for_voice = State()  # Выбор ключевого слова для голосовой реакции
 
 # Проверка на администратора
 def is_admin(message):
@@ -117,6 +120,7 @@ async def cmd_start(message: types.Message):
         "/set_probability - Изменить вероятность реакции для слова\n"
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
+        "/set_voice_reaction - Установить голосовую реакцию для слова\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать справку"
     )
@@ -133,6 +137,7 @@ async def cmd_help(message: types.Message):
         "/set_probability - Изменить вероятность реакции для слова\n"
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
+        "/set_voice_reaction - Установить голосовую реакцию для слова\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать эту справку"
     )
@@ -559,6 +564,103 @@ async def cmd_reload_admins(message: types.Message):
     except Exception as e:
         await message.answer(f"⚠️ Ошибка при загрузке администраторов: {str(e)}")
 
+# Обработчик команды /set_voice_reaction
+@dp.message(Command("set_voice_reaction"))
+async def cmd_set_voice_reaction(message: types.Message, state: FSMContext):
+    if not is_admin(message):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    data = load_data()
+    if not data["keywords"]:
+        await message.answer("⚠️ Список ключевых слов пуст. Сначала добавьте ключевые слова.")
+        return
+    
+    await state.set_state(Form.select_keyword_for_voice)
+    
+    # Создаем клавиатуру в новом формате
+    buttons = []
+    for keyword in data["keywords"]:
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
+    
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    
+    await message.answer("🎤 Выберите ключевое слово, для которого нужно установить голосовую реакцию:",
+                        reply_markup=keyboard)
+
+# Обработчик выбора ключевого слова для голосовой реакции
+@dp.message(Form.select_keyword_for_voice)
+async def process_select_keyword_for_voice(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    keyword = message.text.lower().strip()
+    data = load_data()
+    
+    if keyword in data["keywords"]:
+        await state.update_data(keyword=keyword)
+        await state.set_state(Form.waiting_for_voice)
+        
+        # Проверяем, есть ли уже голосовая реакция для этого ключевого слова
+        voice_file_id = data.get("voice_reactions", {}).get(keyword)
+        
+        if voice_file_id:
+            await message.answer(f"🎤 Для ключевого слова '{keyword}' уже установлена голосовая реакция.\n\n"
+                                f"Отправьте новое голосовое сообщение, чтобы заменить его, или нажмите 'Отмена':",
+                                reply_markup=types.ReplyKeyboardMarkup(
+                                    keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                    resize_keyboard=True,
+                                    one_time_keyboard=True
+                                ))
+        else:
+            await message.answer(f"🎤 Отправьте голосовое сообщение, которое будет использоваться как реакция на ключевое слово '{keyword}':",
+                                reply_markup=types.ReplyKeyboardMarkup(
+                                    keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                    resize_keyboard=True,
+                                    one_time_keyboard=True
+                                ))
+    else:
+        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
+                            reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+
+# Обработчик голосового сообщения для установки реакции
+@dp.message(Form.waiting_for_voice)
+async def process_voice_reaction(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    # Проверяем, что это голосовое сообщение
+    if not message.voice:
+        await message.answer("⚠️ Пожалуйста, отправьте голосовое сообщение или нажмите 'Отмена'.")
+        return
+    
+    # Получаем ключевое слово из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    
+    # Получаем file_id голосового сообщения
+    voice_file_id = message.voice.file_id
+    
+    data = load_data()
+    
+    # Создаем словарь для голосовых реакций, если его еще нет
+    if "voice_reactions" not in data:
+        data["voice_reactions"] = {}
+    
+    # Сохраняем голосовую реакцию
+    data["voice_reactions"][keyword] = voice_file_id
+    save_data(data)
+    
+    await message.answer(f"✅ Голосовая реакция для ключевого слова '{keyword}' успешно установлена.",
+                        reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
+
 # Обработчик всех текстовых сообщений
 @dp.message()
 async def check_keywords(message: types.Message):
@@ -583,7 +685,20 @@ async def check_keywords(message: types.Message):
             
             # Проверяем, должен ли бот отреагировать на основе вероятности
             if random.randint(1, 100) <= probability:
-                await message.reply(reaction)
+                # Проверяем, есть ли голосовая реакция для этого ключевого слова
+                voice_file_id = data.get("voice_reactions", {}).get(keyword)
+                
+                if voice_file_id:
+                    # Отправляем голосовое сообщение
+                    try:
+                        await message.answer_voice(voice_file_id)
+                    except Exception as e:
+                        logging.error(f"Ошибка при отправке голосового сообщения: {e}")
+                        # Если не удалось отправить голосовое, отправляем текстовую реакцию
+                        await message.reply(reaction)
+                else:
+                    # Отправляем текстовую реакцию
+                    await message.reply(reaction)
             
             return  # Прерываем после первого найденного ключевого слова
     
