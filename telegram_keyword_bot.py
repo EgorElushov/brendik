@@ -67,7 +67,9 @@ def save_data(data):
 # Состояния для FSM (конечного автомата)
 class Form(StatesGroup):
     add_keyword = State()  # Состояние добавления ключевого слова
-    add_keyword_reaction = State()  # Состояние добавления реакции для слова
+    add_keyword_reaction_type = State()  # Состояние выбора типа реакции при добавлении слова
+    add_keyword_reaction = State()  # Состояние добавления текстовой реакции для слова
+    add_keyword_voice = State()  # Состояние добавления голосовой реакции для слова
     add_keyword_probability = State()  # Состояние добавления вероятности для слова
     remove_keyword = State()  # Состояние удаления ключевого слова
     set_reaction = State()  # Состояние установки реакции для слова
@@ -79,6 +81,8 @@ class Form(StatesGroup):
     add_admin = State()  # Состояние добавления администратора
     waiting_for_voice = State()  # Ожидание голосового сообщения для реакции
     select_keyword_for_voice = State()  # Выбор ключевого слова для голосовой реакции
+    select_keyword_for_reaction_type = State()  # Выбор ключевого слова для изменения типа реакции
+    set_reaction_type = State()  # Установка типа реакции для ключевого слова
 
 # Проверка на администратора
 def is_admin(message):
@@ -121,6 +125,7 @@ async def cmd_start(message: types.Message):
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
         "/set_voice_reaction - Установить голосовую реакцию для слова\n"
+        "/set_reaction_type - Выбрать тип реакции (текст/голос)\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать справку"
     )
@@ -138,6 +143,7 @@ async def cmd_help(message: types.Message):
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
         "/set_voice_reaction - Установить голосовую реакцию для слова\n"
+        "/set_reaction_type - Выбрать тип реакции (текст/голос)\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать эту справку"
     )
@@ -165,17 +171,63 @@ async def process_add_keyword(message: types.Message, state: FSMContext):
         await message.answer(f"⚠️ Ключевое слово '{keyword}' уже существует.")
         await state.clear()
     else:
-        await state.set_state(Form.add_keyword_reaction)
-        await message.answer(f"📝 Введите реакцию для ключевого слова '{keyword}':")
+        await state.set_state(Form.add_keyword_reaction_type)
+        
+        # Создаем клавиатуру для выбора типа реакции
+        buttons = [
+            [types.KeyboardButton(text="Текст")],
+            [types.KeyboardButton(text="Голос")],
+            [types.KeyboardButton(text="Отмена")]
+        ]
+        
+        keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+        
+        await message.answer(f"📝 Выберите тип реакции для ключевого слова '{keyword}':",
+                            reply_markup=keyboard)
 
-# Обработчик ввода реакции для нового ключевого слова
-@dp.message(Form.add_keyword_reaction)
-async def process_add_keyword_reaction(message: types.Message, state: FSMContext):
-    reaction = message.text
+# Обработчик выбора типа реакции для нового ключевого слова
+@dp.message(Form.add_keyword_reaction_type)
+async def process_add_keyword_reaction_type(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    reaction_type = message.text.lower().strip()
+    
+    if reaction_type not in ["текст", "голос"]:
+        await message.answer("⚠️ Пожалуйста, выберите 'Текст' или 'Голос'.")
+        return
     
     # Получаем ключевое слово из состояния
     user_data = await state.get_data()
     keyword = user_data["keyword"]
+    
+    # Сохраняем тип реакции в состоянии для следующего шага
+    await state.update_data(reaction_type="text" if reaction_type == "текст" else "voice")
+    
+    if reaction_type == "текст":
+        await state.set_state(Form.add_keyword_reaction)
+        await message.answer(f"📝 Введите текстовую реакцию для ключевого слова '{keyword}':",
+                            reply_markup=types.ReplyKeyboardRemove())
+    else:
+        await state.set_state(Form.add_keyword_voice)
+        await message.answer(f"🎤 Отправьте голосовое сообщение, которое будет использоваться как реакция на ключевое слово '{keyword}':",
+                            reply_markup=types.ReplyKeyboardMarkup(
+                                keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                resize_keyboard=True,
+                                one_time_keyboard=True
+                            ))
+
+# Обработчик ввода текстовой реакции для нового ключевого слова
+@dp.message(Form.add_keyword_reaction)
+async def process_add_keyword_reaction(message: types.Message, state: FSMContext):
+    reaction = message.text
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    reaction_type = user_data["reaction_type"]
     
     # Сохраняем реакцию в состоянии для следующего шага
     await state.update_data(reaction=reaction)
@@ -183,6 +235,36 @@ async def process_add_keyword_reaction(message: types.Message, state: FSMContext
     await state.set_state(Form.add_keyword_probability)
     await message.answer(
         f"📊 Введите вероятность реакции для ключевого слова '{keyword}' (от 1 до 100 процентов):"
+    )
+
+# Обработчик голосового сообщения для нового ключевого слова
+@dp.message(Form.add_keyword_voice)
+async def process_add_keyword_voice(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    # Проверяем, что это голосовое сообщение
+    if not message.voice:
+        await message.answer("⚠️ Пожалуйста, отправьте голосовое сообщение или нажмите 'Отмена'.")
+        return
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    reaction_type = user_data["reaction_type"]
+    
+    # Получаем file_id голосового сообщения
+    voice_file_id = message.voice.file_id
+    
+    # Сохраняем голосовую реакцию в состоянии для следующего шага
+    await state.update_data(voice_file_id=voice_file_id)
+    
+    await state.set_state(Form.add_keyword_probability)
+    await message.answer(
+        f"📊 Введите вероятность реакции для ключевого слова '{keyword}' (от 1 до 100 процентов):",
+        reply_markup=types.ReplyKeyboardRemove()
     )
 
 # Обработчик ввода вероятности для нового ключевого слова
@@ -197,18 +279,40 @@ async def process_add_keyword_probability(message: types.Message, state: FSMCont
         # Получаем данные из состояния
         user_data = await state.get_data()
         keyword = user_data["keyword"]
-        reaction = user_data["reaction"]
+        reaction_type = user_data["reaction_type"]
         
         data = load_data()
+        
+        # Создаем запись для ключевого слова
         data["keywords"][keyword] = {
-            "reaction": reaction,
-            "probability": probability
+            "probability": probability,
+            "reaction_type": reaction_type
         }
+        
+        # Если тип реакции - текст, добавляем текстовую реакцию
+        if reaction_type == "text":
+            reaction = user_data["reaction"]
+            data["keywords"][keyword]["reaction"] = reaction
+            
+            reaction_info = f"• Тип реакции: Текст\n• Реакция: {reaction}"
+        # Если тип реакции - голос, добавляем голосовую реакцию
+        else:
+            voice_file_id = user_data["voice_file_id"]
+            
+            # Создаем словарь для голосовых реакций, если его еще нет
+            if "voice_reactions" not in data:
+                data["voice_reactions"] = {}
+            
+            # Сохраняем голосовую реакцию
+            data["voice_reactions"][keyword] = voice_file_id
+            
+            reaction_info = f"• Тип реакции: Голос"
+        
         save_data(data)
         
         await message.answer(
             f"✅ Ключевое слово '{keyword}' успешно добавлено:\n"
-            f"• Реакция: {reaction}\n"
+            f"{reaction_info}\n"
             f"• Вероятность: {probability}%"
         )
         await state.clear()
@@ -277,10 +381,18 @@ async def cmd_list_keywords(message: types.Message):
             if isinstance(info, dict):
                 reaction = info.get("reaction", "Не задана")
                 probability = info.get("probability", 100)
-                keywords_text.append(f"• {keyword}: {reaction} (вероятность: {probability}%)")
+                reaction_type = info.get("reaction_type", "text")
+                
+                # Проверяем, есть ли голосовая реакция для этого ключевого слова
+                has_voice = keyword in data.get("voice_reactions", {})
+                
+                # Добавляем информацию о типе реакции
+                reaction_type_text = "🔊 Голос" if reaction_type == "voice" and has_voice else "📝 Текст"
+                
+                keywords_text.append(f"• {keyword}: {reaction} (вероятность: {probability}%, тип: {reaction_type_text})")
             else:
                 # Для обратной совместимости со старым форматом
-                keywords_text.append(f"• {keyword}: {info} (вероятность: 100%)")
+                keywords_text.append(f"• {keyword}: {info} (вероятность: 100%, тип: 📝 Текст)")
         
         default_reaction = data.get("default_reaction", DEFAULT_REACTION)
         default_probability = data.get("default_probability", 100)
@@ -363,7 +475,8 @@ async def process_set_reaction(message: types.Message, state: FSMContext):
         old_reaction = data["keywords"].get(keyword, "")
         data["keywords"][keyword] = {
             "reaction": new_reaction,
-            "probability": 100  # По умолчанию 100%
+            "probability": 100,  # По умолчанию 100%
+            "reaction_type": "text"  # По умолчанию текстовая реакция
         }
     
     save_data(data)
@@ -448,7 +561,8 @@ async def process_set_probability(message: types.Message, state: FSMContext):
             old_reaction = data["keywords"].get(keyword, "")
             data["keywords"][keyword] = {
                 "reaction": old_reaction,
-                "probability": new_probability
+                "probability": new_probability,
+                "reaction_type": "text"  # По умолчанию текстовая реакция
             }
         
         save_data(data)
@@ -661,6 +775,123 @@ async def process_voice_reaction(message: types.Message, state: FSMContext):
                         reply_markup=types.ReplyKeyboardRemove())
     await state.clear()
 
+# Обработчик команды /set_reaction_type
+@dp.message(Command("set_reaction_type"))
+async def cmd_set_reaction_type(message: types.Message, state: FSMContext):
+    if not is_admin(message):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    data = load_data()
+    if not data["keywords"]:
+        await message.answer("⚠️ Список ключевых слов пуст. Сначала добавьте ключевые слова.")
+        return
+    
+    await state.set_state(Form.select_keyword_for_reaction_type)
+    
+    # Создаем клавиатуру в новом формате
+    buttons = []
+    for keyword in data["keywords"]:
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
+    
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    
+    await message.answer("📝 Выберите ключевое слово, для которого нужно изменить тип реакции:",
+                        reply_markup=keyboard)
+
+# Обработчик выбора ключевого слова для изменения типа реакции
+@dp.message(Form.select_keyword_for_reaction_type)
+async def process_select_keyword_for_reaction_type(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    keyword = message.text.lower().strip()
+    data = load_data()
+    
+    if keyword in data["keywords"]:
+        # Получаем текущий тип реакции
+        if isinstance(data["keywords"][keyword], dict):
+            current_type = data["keywords"][keyword].get("reaction_type", "text")
+        else:
+            # Для обратной совместимости
+            current_type = "text"
+        
+        # Проверяем, есть ли голосовая реакция для этого ключевого слова
+        has_voice = keyword in data.get("voice_reactions", {})
+        
+        await state.update_data(keyword=keyword)
+        await state.set_state(Form.set_reaction_type)
+        
+        # Создаем клавиатуру для выбора типа реакции
+        buttons = []
+        buttons.append([types.KeyboardButton(text="Текст")])
+        
+        # Добавляем кнопку "Голос" только если есть голосовая реакция
+        if has_voice:
+            buttons.append([types.KeyboardButton(text="Голос")])
+        else:
+            await message.answer("⚠️ Для этого ключевого слова нет голосовой реакции. Сначала установите голосовую реакцию с помощью команды /set_voice_reaction.")
+            await state.clear()
+            return
+            
+        buttons.append([types.KeyboardButton(text="Отмена")])
+        
+        keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+        
+        current_type_text = "Голос" if current_type == "voice" else "Текст"
+        
+        await message.answer(f"📊 Текущий тип реакции для '{keyword}': {current_type_text}\n\n"
+                            f"Выберите новый тип реакции:",
+                            reply_markup=keyboard)
+    else:
+        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
+                            reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+
+# Обработчик установки нового типа реакции для ключевого слова
+@dp.message(Form.set_reaction_type)
+async def process_set_reaction_type(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    new_type = message.text.lower().strip()
+    
+    if new_type not in ["текст", "голос"]:
+        await message.answer("⚠️ Пожалуйста, выберите 'Текст' или 'Голос'.")
+        return
+    
+    # Преобразуем в формат для хранения
+    reaction_type = "text" if new_type == "текст" else "voice"
+    
+    # Получаем ключевое слово из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    
+    data = load_data()
+    
+    # Проверяем формат данных и обновляем соответственно
+    if isinstance(data["keywords"].get(keyword), dict):
+        data["keywords"][keyword]["reaction_type"] = reaction_type
+    else:
+        # Преобразуем в новый формат
+        old_reaction = data["keywords"].get(keyword, "")
+        data["keywords"][keyword] = {
+            "reaction": old_reaction,
+            "probability": 100,  # По умолчанию 100%
+            "reaction_type": reaction_type
+        }
+    
+    save_data(data)
+    
+    await message.answer(f"✅ Тип реакции для ключевого слова '{keyword}' успешно изменен на: {new_type}",
+                        reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
+
 # Обработчик всех текстовых сообщений
 @dp.message()
 async def check_keywords(message: types.Message):
@@ -678,23 +909,30 @@ async def check_keywords(message: types.Message):
             if isinstance(info, dict):
                 reaction = info.get("reaction", data.get("default_reaction", DEFAULT_REACTION))
                 probability = info.get("probability", data.get("default_probability", 100))
+                reaction_type = info.get("reaction_type", "text")
             else:
                 # Для обратной совместимости со старым форматом
                 reaction = info
                 probability = data.get("default_probability", 100)
+                reaction_type = "text"
             
             # Проверяем, должен ли бот отреагировать на основе вероятности
             if random.randint(1, 100) <= probability:
-                # Проверяем, есть ли голосовая реакция для этого ключевого слова
-                voice_file_id = data.get("voice_reactions", {}).get(keyword)
-                
-                if voice_file_id:
-                    # Отправляем голосовое сообщение
-                    try:
-                        await message.answer_voice(voice_file_id)
-                    except Exception as e:
-                        logging.error(f"Ошибка при отправке голосового сообщения: {e}")
-                        # Если не удалось отправить голосовое, отправляем текстовую реакцию
+                # Проверяем тип реакции
+                if reaction_type == "voice":
+                    # Проверяем, есть ли голосовая реакция для этого ключевого слова
+                    voice_file_id = data.get("voice_reactions", {}).get(keyword)
+                    
+                    if voice_file_id:
+                        # Отправляем голосовое сообщение
+                        try:
+                            await message.answer_voice(voice_file_id)
+                        except Exception as e:
+                            logging.error(f"Ошибка при отправке голосового сообщения: {e}")
+                            # Если не удалось отправить голосовое, отправляем текстовую реакцию
+                            await message.reply(reaction)
+                    else:
+                        # Если голосовой реакции нет, отправляем текстовую
                         await message.reply(reaction)
                 else:
                     # Отправляем текстовую реакцию
