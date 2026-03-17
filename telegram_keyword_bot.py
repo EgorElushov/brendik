@@ -28,7 +28,8 @@ default_data = {
     "keywords": {},  # Словарь ключевых слов, их реакций и вероятностей
     "default_reaction": DEFAULT_REACTION,  # Реакция по умолчанию для новых слов
     "default_probability": 100,  # Вероятность реакции по умолчанию (в процентах)
-    "voice_reactions": {}  # Словарь голосовых реакций (ключ: keyword, значение: file_id)
+    "voice_reactions": {},  # Словарь голосовых реакций (ключ: keyword, значение: file_id)
+    "gif_reactions": {}  # Словарь GIF реакций (ключ: keyword, значение: animation_file_id)
 }
 
 # Путь к файлу с именами администраторов
@@ -53,7 +54,11 @@ def load_data():
     if os.path.exists(KEYWORDS_FILE):
         with open(KEYWORDS_FILE, "r", encoding="utf-8") as file:
             try:
-                return json.load(file)
+                data = json.load(file)
+                # Обеспечиваем наличие поля gif_reactions для обратной совместимости
+                if "gif_reactions" not in data:
+                    data["gif_reactions"] = {}
+                return data
             except json.JSONDecodeError:
                 return default_data.copy()
     else:
@@ -70,6 +75,7 @@ class Form(StatesGroup):
     add_keyword_reaction_type = State()  # Состояние выбора типа реакции при добавлении слова
     add_keyword_reaction = State()  # Состояние добавления текстовой реакции для слова
     add_keyword_voice = State()  # Состояние добавления голосовой реакции для слова
+    add_keyword_gif = State()  # Состояние добавления GIF реакции для слова
     add_keyword_probability = State()  # Состояние добавления вероятности для слова
     remove_keyword = State()  # Состояние удаления ключевого слова
     set_reaction = State()  # Состояние установки реакции для слова
@@ -80,7 +86,9 @@ class Form(StatesGroup):
     set_default_probability = State()  # Установка вероятности по умолчанию
     add_admin = State()  # Состояние добавления администратора
     waiting_for_voice = State()  # Ожидание голосового сообщения для реакции
+    waiting_for_gif = State()  # Ожидание GIF сообщения для реакции
     select_keyword_for_voice = State()  # Выбор ключевого слова для голосовой реакции
+    select_keyword_for_gif = State()  # Выбор ключевого слова для GIF реакции
     select_keyword_for_reaction_type = State()  # Выбор ключевого слова для изменения типа реакции
     set_reaction_type = State()  # Установка типа реакции для ключевого слова
 
@@ -125,7 +133,8 @@ async def cmd_start(message: types.Message):
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
         "/set_voice_reaction - Установить голосовую реакцию для слова\n"
-        "/set_reaction_type - Выбрать тип реакции (текст/голос)\n"
+        "/set_gif_reaction - Установить GIF реакцию для слова\n"
+        "/set_reaction_type - Выбрать тип реакции (текст/голос/GIF)\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать справку"
     )
@@ -143,7 +152,8 @@ async def cmd_help(message: types.Message):
         "/set_default - Установить реакцию по умолчанию\n"
         "/set_default_prob - Установить вероятность по умолчанию\n"
         "/set_voice_reaction - Установить голосовую реакцию для слова\n"
-        "/set_reaction_type - Выбрать тип реакции (текст/голос)\n"
+        "/set_gif_reaction - Установить GIF реакцию для слова\n"
+        "/set_reaction_type - Выбрать тип реакции (текст/голос/GIF)\n"
         "/add_admin - Добавить нового администратора\n"
         "/help - Показать эту справку"
     )
@@ -177,6 +187,7 @@ async def process_add_keyword(message: types.Message, state: FSMContext):
         buttons = [
             [types.KeyboardButton(text="Текст")],
             [types.KeyboardButton(text="Голос")],
+            [types.KeyboardButton(text="GIF")],
             [types.KeyboardButton(text="Отмена")]
         ]
         
@@ -195,8 +206,8 @@ async def process_add_keyword_reaction_type(message: types.Message, state: FSMCo
     
     reaction_type = message.text.lower().strip()
     
-    if reaction_type not in ["текст", "голос"]:
-        await message.answer("⚠️ Пожалуйста, выберите 'Текст' или 'Голос'.")
+    if reaction_type not in ["текст", "голос", "gif"]:
+        await message.answer("⚠️ Пожалуйста, выберите 'Текст', 'Голос' или 'GIF'.")
         return
     
     # Получаем ключевое слово из состояния
@@ -204,15 +215,28 @@ async def process_add_keyword_reaction_type(message: types.Message, state: FSMCo
     keyword = user_data["keyword"]
     
     # Сохраняем тип реакции в состоянии для следующего шага
-    await state.update_data(reaction_type="text" if reaction_type == "текст" else "voice")
+    reaction_type_mapping = {
+        "текст": "text",
+        "голос": "voice",
+        "gif": "gif"
+    }
+    await state.update_data(reaction_type=reaction_type_mapping[reaction_type])
     
     if reaction_type == "текст":
         await state.set_state(Form.add_keyword_reaction)
         await message.answer(f"📝 Введите текстовую реакцию для ключевого слова '{keyword}':",
                             reply_markup=types.ReplyKeyboardRemove())
-    else:
+    elif reaction_type == "голос":
         await state.set_state(Form.add_keyword_voice)
         await message.answer(f"🎤 Отправьте голосовое сообщение, которое будет использоваться как реакция на ключевое слово '{keyword}':",
+                            reply_markup=types.ReplyKeyboardMarkup(
+                                keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                resize_keyboard=True,
+                                one_time_keyboard=True
+                            ))
+    else:  # gif
+        await state.set_state(Form.add_keyword_gif)
+        await message.answer(f"🎬 Отправьте GIF анимацию, которая будет использоваться как реакция на ключевое слово '{keyword}':",
                             reply_markup=types.ReplyKeyboardMarkup(
                                 keyboard=[[types.KeyboardButton(text="Отмена")]],
                                 resize_keyboard=True,
@@ -267,6 +291,39 @@ async def process_add_keyword_voice(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
 
+# Обработчик GIF сообщения для нового ключевого слова
+@dp.message(Form.add_keyword_gif)
+async def process_add_keyword_gif(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    # Проверяем, что это GIF анимация или документ с GIF
+    gif_file_id = None
+    if message.animation:
+        gif_file_id = message.animation.file_id
+    elif message.document and message.document.mime_type == "image/gif":
+        gif_file_id = message.document.file_id
+    
+    if not gif_file_id:
+        await message.answer("⚠️ Пожалуйста, отправьте GIF анимацию или нажмите 'Отмена'.")
+        return
+    
+    # Получаем данные из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    reaction_type = user_data["reaction_type"]
+    
+    # Сохраняем GIF реакцию в состоянии для следующего шага
+    await state.update_data(gif_file_id=gif_file_id)
+    
+    await state.set_state(Form.add_keyword_probability)
+    await message.answer(
+        f"📊 Введите вероятность реакции для ключевого слова '{keyword}' (от 1 до 100 процентов):",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
+
 # Обработчик ввода вероятности для нового ключевого слова
 @dp.message(Form.add_keyword_probability)
 async def process_add_keyword_probability(message: types.Message, state: FSMContext):
@@ -296,7 +353,7 @@ async def process_add_keyword_probability(message: types.Message, state: FSMCont
             
             reaction_info = f"• Тип реакции: Текст\n• Реакция: {reaction}"
         # Если тип реакции - голос, добавляем голосовую реакцию
-        else:
+        elif reaction_type == "voice":
             voice_file_id = user_data["voice_file_id"]
             
             # Создаем словарь для голосовых реакций, если его еще нет
@@ -307,6 +364,18 @@ async def process_add_keyword_probability(message: types.Message, state: FSMCont
             data["voice_reactions"][keyword] = voice_file_id
             
             reaction_info = f"• Тип реакции: Голос"
+        # Если тип реакции - GIF, добавляем GIF реакцию
+        else:  # gif
+            gif_file_id = user_data["gif_file_id"]
+            
+            # Создаем словарь для GIF реакций, если его еще нет
+            if "gif_reactions" not in data:
+                data["gif_reactions"] = {}
+            
+            # Сохраняем GIF реакцию
+            data["gif_reactions"][keyword] = gif_file_id
+            
+            reaction_info = f"• Тип реакции: GIF"
         
         save_data(data)
         
@@ -383,11 +452,17 @@ async def cmd_list_keywords(message: types.Message):
                 probability = info.get("probability", 100)
                 reaction_type = info.get("reaction_type", "text")
                 
-                # Проверяем, есть ли голосовая реакция для этого ключевого слова
+                # Проверяем, есть ли голосовая или GIF реакция для этого ключевого слова
                 has_voice = keyword in data.get("voice_reactions", {})
+                has_gif = keyword in data.get("gif_reactions", {})
                 
                 # Добавляем информацию о типе реакции
-                reaction_type_text = "🔊 Голос" if reaction_type == "voice" and has_voice else "📝 Текст"
+                if reaction_type == "gif" and has_gif:
+                    reaction_type_text = "🎬 GIF"
+                elif reaction_type == "voice" and has_voice:
+                    reaction_type_text = "🔊 Голос"
+                else:
+                    reaction_type_text = "📝 Текст"
                 
                 keywords_text.append(f"• {keyword}: {reaction} (вероятность: {probability}%, тип: {reaction_type_text})")
             else:
@@ -775,6 +850,106 @@ async def process_voice_reaction(message: types.Message, state: FSMContext):
                         reply_markup=types.ReplyKeyboardRemove())
     await state.clear()
 
+# Обработчик команды /set_gif_reaction
+@dp.message(Command("set_gif_reaction"))
+async def cmd_set_gif_reaction(message: types.Message, state: FSMContext):
+    if not is_admin(message):
+        await message.answer("⛔ У вас нет прав администратора.")
+        return
+    
+    data = load_data()
+    if not data["keywords"]:
+        await message.answer("⚠️ Список ключевых слов пуст. Сначала добавьте ключевые слова.")
+        return
+    
+    await state.set_state(Form.select_keyword_for_gif)
+    
+    # Создаем клавиатуру в новом формате
+    buttons = []
+    for keyword in data["keywords"]:
+        buttons.append([types.KeyboardButton(text=keyword)])
+    buttons.append([types.KeyboardButton(text="Отмена")])
+    
+    keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
+    
+    await message.answer("🎬 Выберите ключевое слово, для которого нужно установить GIF реакцию:",
+                        reply_markup=keyboard)
+
+# Обработчик выбора ключевого слова для GIF реакции
+@dp.message(Form.select_keyword_for_gif)
+async def process_select_keyword_for_gif(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    keyword = message.text.lower().strip()
+    data = load_data()
+    
+    if keyword in data["keywords"]:
+        await state.update_data(keyword=keyword)
+        await state.set_state(Form.waiting_for_gif)
+        
+        # Проверяем, есть ли уже GIF реакция для этого ключевого слова
+        gif_file_id = data.get("gif_reactions", {}).get(keyword)
+        
+        if gif_file_id:
+            await message.answer(f"🎬 Для ключевого слова '{keyword}' уже установлена GIF реакция.\n\n"
+                                f"Отправьте новую GIF анимацию, чтобы заменить её, или нажмите 'Отмена':",
+                                reply_markup=types.ReplyKeyboardMarkup(
+                                    keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                    resize_keyboard=True,
+                                    one_time_keyboard=True
+                                ))
+        else:
+            await message.answer(f"🎬 Отправьте GIF анимацию, которая будет использоваться как реакция на ключевое слово '{keyword}':",
+                                reply_markup=types.ReplyKeyboardMarkup(
+                                    keyboard=[[types.KeyboardButton(text="Отмена")]],
+                                    resize_keyboard=True,
+                                    one_time_keyboard=True
+                                ))
+    else:
+        await message.answer(f"⚠️ Ключевое слово '{keyword}' не найдено.",
+                            reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+
+# Обработчик GIF сообщения для установки реакции
+@dp.message(Form.waiting_for_gif)
+async def process_gif_reaction(message: types.Message, state: FSMContext):
+    if message.text == "Отмена":
+        await message.answer("❌ Операция отменена.", reply_markup=types.ReplyKeyboardRemove())
+        await state.clear()
+        return
+    
+    # Проверяем, что это GIF анимация или документ с GIF
+    gif_file_id = None
+    if message.animation:
+        gif_file_id = message.animation.file_id
+    elif message.document and message.document.mime_type == "image/gif":
+        gif_file_id = message.document.file_id
+    
+    if not gif_file_id:
+        await message.answer("⚠️ Пожалуйста, отправьте GIF анимацию или нажмите 'Отмена'.")
+        return
+    
+    # Получаем ключевое слово из состояния
+    user_data = await state.get_data()
+    keyword = user_data["keyword"]
+    
+    data = load_data()
+    
+    # Создаем словарь для GIF реакций, если его еще нет
+    if "gif_reactions" not in data:
+        data["gif_reactions"] = {}
+    
+    # Сохраняем GIF реакцию
+    data["gif_reactions"][keyword] = gif_file_id
+    save_data(data)
+    
+    await message.answer(f"✅ GIF реакция для ключевого слова '{keyword}' успешно установлена.",
+                        reply_markup=types.ReplyKeyboardRemove())
+    await state.clear()
+
 # Обработчик команды /set_reaction_type
 @dp.message(Command("set_reaction_type"))
 async def cmd_set_reaction_type(message: types.Message, state: FSMContext):
@@ -819,8 +994,9 @@ async def process_select_keyword_for_reaction_type(message: types.Message, state
             # Для обратной совместимости
             current_type = "text"
         
-        # Проверяем, есть ли голосовая реакция для этого ключевого слова
+        # Проверяем, есть ли голосовая или GIF реакция для этого ключевого слова
         has_voice = keyword in data.get("voice_reactions", {})
+        has_gif = keyword in data.get("gif_reactions", {})
         
         await state.update_data(keyword=keyword)
         await state.set_state(Form.set_reaction_type)
@@ -832,16 +1008,22 @@ async def process_select_keyword_for_reaction_type(message: types.Message, state
         # Добавляем кнопку "Голос" только если есть голосовая реакция
         if has_voice:
             buttons.append([types.KeyboardButton(text="Голос")])
-        else:
-            await message.answer("⚠️ Для этого ключевого слова нет голосовой реакции. Сначала установите голосовую реакцию с помощью команды /set_voice_reaction.")
-            await state.clear()
-            return
+            
+        # Добавляем кнопку "GIF" только если есть GIF реакция
+        if has_gif:
+            buttons.append([types.KeyboardButton(text="GIF")])
             
         buttons.append([types.KeyboardButton(text="Отмена")])
         
         keyboard = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
         
-        current_type_text = "Голос" if current_type == "voice" else "Текст"
+        # Определяем текущий тип реакции для отображения
+        if current_type == "gif":
+            current_type_text = "GIF"
+        elif current_type == "voice":
+            current_type_text = "Голос"
+        else:
+            current_type_text = "Текст"
         
         await message.answer(f"📊 Текущий тип реакции для '{keyword}': {current_type_text}\n\n"
                             f"Выберите новый тип реакции:",
@@ -861,12 +1043,17 @@ async def process_set_reaction_type(message: types.Message, state: FSMContext):
     
     new_type = message.text.lower().strip()
     
-    if new_type not in ["текст", "голос"]:
-        await message.answer("⚠️ Пожалуйста, выберите 'Текст' или 'Голос'.")
+    if new_type not in ["текст", "голос", "gif"]:
+        await message.answer("⚠️ Пожалуйста, выберите 'Текст', 'Голос' или 'GIF'.")
         return
     
     # Преобразуем в формат для хранения
-    reaction_type = "text" if new_type == "текст" else "voice"
+    reaction_type_mapping = {
+        "текст": "text",
+        "голос": "voice",
+        "gif": "gif"
+    }
+    reaction_type = reaction_type_mapping[new_type]
     
     # Получаем ключевое слово из состояния
     user_data = await state.get_data()
@@ -933,6 +1120,21 @@ async def check_keywords(message: types.Message):
                             await message.reply(reaction)
                     else:
                         # Если голосовой реакции нет, отправляем текстовую
+                        await message.reply(reaction)
+                elif reaction_type == "gif":
+                    # Проверяем, есть ли GIF реакция для этого ключевого слова
+                    gif_file_id = data.get("gif_reactions", {}).get(keyword)
+                    
+                    if gif_file_id:
+                        # Отправляем GIF анимацию
+                        try:
+                            await message.answer_animation(gif_file_id)
+                        except Exception as e:
+                            logging.error(f"Ошибка при отправке GIF: {e}")
+                            # Если не удалось отправить GIF, отправляем текстовую реакцию
+                            await message.reply(reaction)
+                    else:
+                        # Если GIF реакции нет, отправляем текстовую
                         await message.reply(reaction)
                 else:
                     # Отправляем текстовую реакцию
